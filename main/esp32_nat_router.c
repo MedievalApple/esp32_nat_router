@@ -12,6 +12,7 @@
 #include <pthread.h>
 #include "esp_system.h"
 #include "esp_log.h"
+#include "led_strip.h"
 #include "esp_console.h"
 #include "driver/uart.h"
 #include "driver/uart_vfs.h"
@@ -47,8 +48,12 @@
 // On board LED
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
 #define BLINK_GPIO 44
+#elif defined(CONFIG_IDF_TARGET_ESP32C5)
+#define BLINK_GPIO 27
+#define LED_STRIP true
 #else
 #define BLINK_GPIO 2
+#define LED_STRIP false
 #endif
 
 /* FreeRTOS event group to signal when we are connected*/
@@ -325,24 +330,97 @@ static void initialize_console(void)
 #endif
 }
 
+#ifdef LED_STRIP
+
+static led_strip_handle_t led_strip;
+
+static void blink_led(bool state, int r, int g, int b)
+{
+    /* If the addressable LED is enabled */
+    if (state) {
+        /* Set the LED pixel using RGB from 0 (0%) to 255 (100%) for each color */
+        led_strip_set_pixel(led_strip, 0, r, g, b);
+        /* Refresh the strip to send data */
+        led_strip_refresh(led_strip);
+    } else {
+        /* Set all LED off to clear all pixels */
+        led_strip_clear(led_strip);
+    }
+}
+
+static void configure_led(void)
+{
+    ESP_LOGI(TAG, "Configured to blink addressable LED!");
+    /* LED strip initialization with the GPIO and pixels number*/
+    led_strip_config_t strip_config = {
+        .strip_gpio_num = BLINK_GPIO,
+        .max_leds = 1, // at least one LED on board
+    };
+    led_strip_spi_config_t spi_config = {
+        .spi_bus = SPI2_HOST,
+        .flags.with_dma = true,
+    };
+    ESP_ERROR_CHECK(led_strip_new_spi_device(&strip_config, &spi_config, &led_strip));
+    /* Set all LED off to clear all pixels */
+    led_strip_clear(led_strip);
+}
+
+#else
+
+static void blink_led(bool state)
+{
+    /* Set the GPIO level according to the state (LOW or HIGH)*/
+    gpio_set_level(BLINK_GPIO, state);
+}
+
+static void configure_led(void)
+{
+    ESP_LOGI(TAG, "Configured to blink GPIO LED!");
+    gpio_reset_pin(BLINK_GPIO);
+    /* Set the GPIO as a push/pull output */
+    gpio_set_direction(BLINK_GPIO, GPIO_MODE_OUTPUT);
+}
+#endif
+
 void * led_status_thread(void * p)
 {
-    gpio_reset_pin(BLINK_GPIO);
-    gpio_set_direction(BLINK_GPIO, GPIO_MODE_OUTPUT);
+    // gpio_reset_pin(BLINK_GPIO);
+    // gpio_set_direction(BLINK_GPIO, GPIO_MODE_OUTPUT);
 
     while (true)
     {
-        gpio_set_level(BLINK_GPIO, ap_connect);
+        #ifdef LED_STRIP
+        for (int i = 0; i < connect_count; i++)
+        {
+            // gpio_set_level(BLINK_GPIO, 1 - ap_connect);
+            blink_led(true, 0, 16, 0);
+            vTaskDelay(1500 / portTICK_PERIOD_MS);
+            // gpio_set_level(BLINK_GPIO, ap_connect);
+            if (connect_count - 1 != i)
+            {
+                blink_led(false, 0, 0, 0);
+                vTaskDelay(500 / portTICK_PERIOD_MS);
+            }
+        }
+
+        blink_led(ap_connect, 16, 0, 0);
+        vTaskDelay(2500 / portTICK_PERIOD_MS);
+        #else
+        // gpio_set_level(BLINK_GPIO, ap_connect);
+        blink_led(ap_connect);
 
         for (int i = 0; i < connect_count; i++)
         {
-            gpio_set_level(BLINK_GPIO, 1 - ap_connect);
+            // gpio_set_level(BLINK_GPIO, 1 - ap_connect);
+            blink_led(1 - ap_connect);
             vTaskDelay(50 / portTICK_PERIOD_MS);
-            gpio_set_level(BLINK_GPIO, ap_connect);
+            // gpio_set_level(BLINK_GPIO, ap_connect);
+            blink_led(ap_connect);
             vTaskDelay(50 / portTICK_PERIOD_MS);
         }
 
         vTaskDelay(1000 / portTICK_PERIOD_MS);
+        #endif
     }
 }
 
@@ -600,6 +678,8 @@ void app_main(void)
 
     // Setup WIFI
     wifi_init(mac, ssid, ent_username, ent_identity, passwd, static_ip, subnet_mask, gateway_addr, ap_mac, ap_ssid, ap_passwd, ap_ip);
+
+    configure_led();
 
     pthread_t t1;
     pthread_create(&t1, NULL, led_status_thread, NULL);
